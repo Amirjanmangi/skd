@@ -323,6 +323,13 @@ export const BotControlPanel: React.FC<BotControlPanelProps> = ({
                 </button>
               ))}
             </div>
+
+            {config.symbol.toUpperCase().includes('ETH') && (
+              <div className="mt-1.5 p-1.5 rounded bg-cyan-950/40 border border-cyan-500/40 text-[10px] font-mono text-cyan-300 flex items-center justify-between">
+                <span>⚡ ETH Rule Active: Target = Entry + $4.00</span>
+                <span className="text-emerald-400 font-bold">Auto-Exit & Next Trade</span>
+              </div>
+            )}
           </div>
 
           {/* Scalp Hold Duration (1-5 seconds window) */}
@@ -502,20 +509,10 @@ export const BotControlPanel: React.FC<BotControlPanelProps> = ({
 
             <div>
               <label className="text-[11px] text-slate-400 block mb-1">
-                Tight Micro Stop-Loss Buffer: <span className="text-white font-mono font-bold">{config.stopLossBps} bps</span>
+                Stop-Loss Protection: <span className="text-emerald-400 font-mono font-bold">REMOVED (Zero Fee Drag)</span>
               </label>
-              <input
-                type="range"
-                min="2"
-                max="20"
-                step="1"
-                value={config.stopLossBps}
-                onChange={(e) => onUpdateConfig({ stopLossBps: parseInt(e.target.value, 10) })}
-                className="w-full accent-rose-500 cursor-pointer"
-              />
-              <div className="flex justify-between text-[9px] text-slate-500 font-mono mt-0.5">
-                <span>2 bps (0.02%)</span>
-                <span>20 bps (0.20%)</span>
+              <div className="p-2 rounded bg-emerald-950/40 border border-emerald-500/40 text-[10px] font-mono text-emerald-300">
+                🛡️ Stop-loss exit removed per user rule! In spot crypto, coins are held safely until profit target is hit to eliminate exchange fee/tax deduction drag.
               </div>
             </div>
 

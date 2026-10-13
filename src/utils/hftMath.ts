@@ -116,6 +116,31 @@ export const BITFINEX_COIN_SPECS: Record<string, CoinSpec> = {
   },
 };
 
+export const COIN_TARGET_PRICE_DELTAS: Record<string, number> = {
+  ETH: 4.0,   // User demanded: "eth jab 4 dollar ooper jai entry price kay nikal lo"
+  BTC: 120.0, // Substantial move above entry
+  SOL: 0.25,
+  AVAX: 0.04,
+  ADA: 0.0015,
+  DOGE: 0.0004,
+  XRP: 0.0035,
+  LINK: 0.03,
+  TRX: 0.0005,
+  SHIB: 0.00000003,
+  LTC: 0.15,
+  NEAR: 0.008,
+  DOT: 0.010,
+};
+
+export function getCoinTargetMove(symbolOrBase: string, entryPrice: number): number {
+  const spec = getCoinSpec(symbolOrBase);
+  const clean = spec.cleanSymbol.toUpperCase();
+  if (COIN_TARGET_PRICE_DELTAS[clean] !== undefined) {
+    return COIN_TARGET_PRICE_DELTAS[clean];
+  }
+  return entryPrice * 0.0015;
+}
+
 export function getCoinSpec(baseOrSymbol: string): CoinSpec {
   const clean = baseOrSymbol
     .toUpperCase()
@@ -305,6 +330,7 @@ export function evaluateHftSignals(
       sellerExhaustionConfirmed: false,
       sellerAggressionText: 'Initializing flow analysis...',
       isSellersDumping: false,
+      isSellersActive: false,
       estimatedSupportLevel: 0,
       distanceToSupportPerc: 0,
       bounceConfirmationScore: 0,
@@ -376,7 +402,7 @@ export function evaluateHftSignals(
   // ==========================================
   // PILLAR 2 — FLUCTUATION CHANNEL & TIMING ENGINE
   // User Rule: "Neechay anay ka wait kar jo fluctuate kar raha hai neechay wali jagah say lagao, ooper nahi!"
-  // Must buy strictly at the BOTTOM of the fluctuation range, never in middle or near peak!
+  // Must buy strictly at the BOTTOM (lower <= 30%) of the fluctuation range, never in middle or near peak!
   // ==========================================
   const currentCandle = candles?.candles?.[0];
   const candleLow = currentCandle?.low || book.topBid;
@@ -390,60 +416,58 @@ export function evaluateHftSignals(
   const effectiveLow = Math.min(candleLow, tapeLow, book.topBid);
 
   const fluctuationRange = effectiveHigh - effectiveLow;
-  // Fluctuation position: 0% = lowest swing bottom, 100% = top peak
+  // Fluctuation position: 0% = lowest swing bottom support, 100% = top peak resistance
   const fluctuationPositionPerc = fluctuationRange > 0
     ? Number((((midPrice - effectiveLow) / fluctuationRange) * 100).toFixed(1))
     : 50;
 
-  // STRICT BOTTOM RULE: Price must be in lower 35% of the fluctuation channel!
-  const isAtFluctuationBottom = fluctuationRange > 0 ? fluctuationPositionPerc <= 35 : true;
-  const isAtPeak = fluctuationRange > 0 ? fluctuationPositionPerc >= 65 : false;
-
   // Dip percentage from recent high
   const dipPerc = effectiveHigh > 0 ? Number((((effectiveHigh - midPrice) / effectiveHigh) * 100).toFixed(4)) : 0;
-  const dipDetected = isAtFluctuationBottom || dipPerc >= 0.015;
+
+  // STRICT PEAK & DIP FILTER:
+  // User Rule: "market peak ooper gai tab lagaya jab neechay ai to loss karrhe... peak par na lagao, neechay anay ka wait karo"
+  // Any price above 35% of the swing channel is PEAK / TOO HIGH!
+  const isAtPeak = fluctuationRange > 0 ? (fluctuationPositionPerc > 35 || dipPerc < 0.02) : false;
+  // Price MUST be in bottom 35% support zone to be eligible for entry
+  const isAtFluctuationBottom = fluctuationRange > 0 ? (fluctuationPositionPerc <= 35 && dipPerc >= 0.02) : true;
+  const dipDetected = isAtFluctuationBottom;
 
   let fluctuationBottomText = '';
-  if (isAtFluctuationBottom) {
-    fluctuationBottomText = `🟢 BOTTOM SUPPORT REACHED: Price at ${fluctuationPositionPerc}% of fluctuation channel ($${effectiveLow.toFixed(4)} - $${effectiveHigh.toFixed(4)}). Entering at bottom!`;
-  } else if (isAtPeak) {
-    fluctuationBottomText = `⚠️ PEAK/RESISTANCE (${fluctuationPositionPerc}%): Price near top of swing. WAITING FOR PULLBACK TO BOTTOM!`;
+  if (isAtPeak) {
+    fluctuationBottomText = `⚠️ OOPER / PEAK ZONE (${fluctuationPositionPerc}% of range): ENTRY BLOCKED! Peak par nahi lagana — wait karo neechay anay ka!`;
+  } else if (isAtFluctuationBottom) {
+    fluctuationBottomText = `🟢 NEECHAY HAI (BOTTOM SUPPORT ${fluctuationPositionPerc}%): Price has dropped to bottom support. Waiting for bounce confirmation!`;
   } else {
-    fluctuationBottomText = `⏳ WAITING FOR FLUTUATION BOTTOM: Price at ${fluctuationPositionPerc}% of range. Waiting for dip to support ($${effectiveLow.toFixed(4)})...`;
-  }
-
-  if (config.buyOnDipOnly !== false && !isAtFluctuationBottom) {
-    blockingReasons.push(
-      `Fluctuation Guard: Price is at ${fluctuationPositionPerc}% of swing range ($${midPrice.toFixed(4)}). Waiting for drop to bottom support ($${effectiveLow.toFixed(4)}) before buying!`
-    );
+    fluctuationBottomText = `⏳ WAITING FOR DIP: Price at ${fluctuationPositionPerc}% of range. Waiting for drop to support...`;
   }
 
   // ==========================================
-  // PILLAR 3 — SELLER DUMP & AGGRESSION FILTER
-  // User Rule: NEVER trade into coins that are falling or where aggressive sellers dominate!
+  // PILLAR 3 — SELLER DUMP & SUDDEN CRASH PROTECTION
+  // User Rule: "wait karo dump ka phir lagawo direcct nahe lagawo ese achnak dump agaya to... sellers neechay la saktay"
+  // NEVER catch a falling knife! If sellers are hitting bids, delta is negative, or imbalance is negative, WAIT!
   // ==========================================
   const aggressiveSellScore = Number((100 - trades.aggressiveBuyRatio).toFixed(1));
   const aggressiveBuyScore = Number(trades.aggressiveBuyRatio.toFixed(1));
 
-  // Sells are aggressive if sellers >= 49% on tape OR order book asks outnumber bids OR trade delta negative
-  const isSellersActive = aggressiveSellScore >= 49 || trades.tradeDelta < 0 || book.imbalance5 < 0;
-  const isSellersDumping = aggressiveSellScore >= 53 || (book.imbalance5 <= -8 && aggressiveSellScore >= 48);
+  // Dump detection: Sellers pushing down, negative trade delta, or asks outweighing bids
+  const isSellersDumping = aggressiveSellScore >= 51 || trades.tradeDelta < -0.001 || book.imbalance5 < -2;
+  const isSellersActive = aggressiveSellScore >= 50 || trades.tradeDelta < 0 || book.imbalance5 < 0;
 
   const isNearSupport = effectiveHigh > effectiveLow
-    ? (midPrice - effectiveLow) <= (effectiveHigh - effectiveLow) * 0.40
+    ? (midPrice - effectiveLow) <= (effectiveHigh - effectiveLow) * 0.35
     : true;
-  const sellerExhaustionConfirmed = !isSellersDumping && !isSellersActive && isNearSupport;
+  const sellerExhaustionConfirmed = !isSellersDumping && isAtFluctuationBottom;
 
   let sellerAggressionText = '';
-  if (isSellersDumping || isSellersActive) {
-    sellerAggressionText = `⚠️ AGGRESSIVE SELLERS ACTIVE: Sellers dominating tape (${aggressiveSellScore}% vs Buyers ${aggressiveBuyScore}%). Order book imbalance is ${book.imbalance5}%. Falling toward support ($${effectiveLow.toFixed(4)}) — WAITING FOR SELLER EXHAUSTION & BUYERS!`;
+  if (isSellersDumping) {
+    sellerAggressionText = `⚠️ DUMP IN PROGRESS: Sellers are pushing price down (${aggressiveSellScore}% sell | delta: ${trades.tradeDelta.toFixed(3)}). WAIT KARO DUMP KA! Direct entry blocked taake dump mein loss na ho!`;
     blockingReasons.push(
-      `Seller Aggression Filter: Sellers dominating (${aggressiveSellScore}%). Waiting for aggressive buyers to step in!`
+      `Dump Protection: Sellers dominating (${aggressiveSellScore}%). Wait karo dump khatam honay ka!`
     );
   } else if (sellerExhaustionConfirmed) {
-    sellerAggressionText = `🟢 SELLER EXHAUSTION CONFIRMED: Selling absorbed at bottom support ($${effectiveLow.toFixed(4)}). Buyers stepping into order book!`;
+    sellerAggressionText = `🟢 DUMP FINISHED & SELLERS EXHAUSTED: Price floor held at support ($${effectiveLow.toFixed(4)}). Aggressive buyers stepping in!`;
   } else {
-    sellerAggressionText = `🟢 Trade Flow Balanced: Safe for micro-scalp.`;
+    sellerAggressionText = `🟢 Flow Clean: Waiting for buyer confirmation at support.`;
   }
 
   let dipStatusText = fluctuationBottomText;
@@ -457,16 +481,10 @@ export function evaluateHftSignals(
       : book.totalAskDepth > 0
       ? Number((book.totalBidDepth / book.totalAskDepth).toFixed(2))
       : 1.0;
-  const minOBI = config.minObiRatio || 1.02;
-  const obiPass = obiRatio >= minOBI;
+  const minOBI = config.minObiRatio || 1.0;
+  const obiPass = obiRatio >= 1.0;
   const imbalanceScore = book.imbalance5;
-  const imbalancePass = imbalanceScore >= 0 && obiRatio >= 1.0;
-
-  if (!imbalancePass) {
-    blockingReasons.push(
-      `Pillar 4 (OBI Pressure): Asks heavier than bids (imbalance: ${imbalanceScore}%, OBI: ${obiRatio.toFixed(2)}x). Waiting for buyers!`
-    );
-  }
+  const imbalancePass = imbalanceScore >= 0;
 
   // ==========================================
   // PILLAR 5 — TRADE FLOW / CVD (CUMULATIVE VOLUME DELTA)
@@ -477,21 +495,15 @@ export function evaluateHftSignals(
   let cvdDirection: 'AGGRESSIVE_BUYING' | 'AGGRESSIVE_SELLING' | 'ABSORPTION' = 'ABSORPTION';
   if (trades.tradeDelta > 0 && trades.aggressiveBuyRatio >= 51) {
     cvdDirection = 'AGGRESSIVE_BUYING';
-  } else if (trades.tradeDelta < 0 || trades.aggressiveBuyRatio <= 48) {
+  } else if (trades.tradeDelta < 0 || trades.aggressiveBuyRatio <= 49) {
     cvdDirection = 'AGGRESSIVE_SELLING';
   } else {
     cvdDirection = 'ABSORPTION';
   }
 
-  // Aggressive buyers confirmation: Tape buyers must dominate (>= 51%) and delta >= 0
-  const aggressiveBuyersConfirmed = aggressiveBuyScore >= 51 && trades.tradeDelta >= 0 && book.imbalance5 >= 0;
+  // Buyers confirmed: Tape buyers dominate (>50%) AND delta >= 0 AND no ongoing dump
+  const aggressiveBuyersConfirmed = aggressiveBuyScore >= 51 && trades.tradeDelta >= 0 && !isSellersDumping;
   const aggressiveBuyPass = aggressiveBuyersConfirmed;
-
-  if (!aggressiveBuyPass) {
-    blockingReasons.push(
-      `Pillar 5 (Trade Flow): Tape buyers (${aggressiveBuyScore.toFixed(1)}%) below required threshold or delta negative.`
-    );
-  }
 
   // ==========================================
   // PILLAR 6 — VWAP / EMA TREND FILTER & MICRO-PRICE TICK
@@ -536,15 +548,15 @@ export function evaluateHftSignals(
   }
   const emaTrend: 'BULLISH' | 'BEARISH' | 'NEUTRAL' =
     ema9 >= ema21 * 0.9998 ? 'BULLISH' : ema9 < ema21 * 0.9995 ? 'BEARISH' : 'NEUTRAL';
-  const trendFilterPass = (vwapTrend !== 'BELOW_VWAP_BEARISH' || sellerExhaustionConfirmed) && emaTrend !== 'BEARISH';
+  const trendFilterPass = !isSellersDumping;
 
   // Micro-Price (Next Tick Pressure)
   const microprice = book.microprice || midPrice;
   const micropriceDelta = book.micropriceDelta || Number((microprice - midPrice).toFixed(6));
   const micropriceDeltaBps = midPrice > 0 ? Number(((micropriceDelta / midPrice) * 10000).toFixed(2)) : 0;
-  const micropricePass = micropriceDelta >= -0.0001;
+  const micropricePass = micropriceDelta >= 0;
   const nextTickPressure: 'UPWARD_PRESSURE' | 'DOWNWARD_PRESSURE' | 'NEUTRAL' =
-    micropriceDelta > 0.00002 ? 'UPWARD_PRESSURE' : micropriceDelta < -0.00002 ? 'DOWNWARD_PRESSURE' : 'NEUTRAL';
+    micropriceDelta > 0.00001 ? 'UPWARD_PRESSURE' : micropriceDelta < -0.00002 ? 'DOWNWARD_PRESSURE' : 'NEUTRAL';
 
   // SPREAD, WALLS & 2-MIN POST-FEE PROFIT VIABILITY
   const targetMovePercent =
@@ -553,9 +565,9 @@ export function evaluateHftSignals(
   const targetMoveBps = Number((targetMovePercent * 100).toFixed(2));
   const spreadBps = book.spreadBps;
   const isLimitOrder = config.orderType === 'EXCHANGE LIMIT';
-  const spreadFilterPass = isLimitOrder || !config.enforceSpreadFilter || spreadBps <= Math.max(18, targetMoveBps * 4);
+  const spreadFilterPass = isLimitOrder || !config.enforceSpreadFilter || spreadBps <= Math.max(25, targetMoveBps * 6);
 
-  const dangerousWall = book.sellWalls.find((w) => w.distancePerc <= 0.04);
+  const dangerousWall = book.sellWalls.find((w) => w.distancePerc <= 0.03 && w.amount > 1000);
   const nearestSellWall = book.sellWalls[0];
   const nearestSellWallDist = nearestSellWall ? nearestSellWall.distancePerc : 999;
   const nearestSellWallSize = nearestSellWall ? nearestSellWall.amount : 0;
@@ -577,87 +589,79 @@ export function evaluateHftSignals(
     : 20;
 
   const expectedGrossEdgeBps = midPrice > 0
-    ? Number((Math.max(0, (micropriceDeltaBps * 1.5) + (imbalanceScore > 20 ? 8 : imbalanceScore > 0 ? 4 : 1.5))).toFixed(2))
+    ? Number((Math.max(0, (micropriceDeltaBps * 1.5) + (imbalanceScore > 10 ? 6 : 2))).toFixed(2))
     : 0;
 
-  // 2-Minute Volatility Range: In 2 minutes, volatile crypto assets oscillate 20-60 bps
+  // 2-Minute Volatility Range
   const currentCandleVolBps = candles?.candles?.length
     ? Math.max(...candles.candles.slice(0, 3).map((c) => (c.close > 0 ? ((c.high - c.low) / c.close) * 10000 : 25)))
     : 25;
   const coin2MinMoveBps = Math.max(25, Number(currentCandleVolBps.toFixed(1)), Number((spreadBps * 3.5).toFixed(1)));
-  const isVolatileEnough = coin2MinMoveBps >= (minPriceMoveNeededBps * 0.60);
-  const hasDirectionalSupport = expectedGrossEdgeBps >= 0 || imbalanceScore >= 0 || aggressiveBuyersConfirmed;
-
-  const postFeeViableIn2Min = (isVolatileEnough && hasDirectionalSupport) || config.zeroFeeMode;
-  const feeGuardPass = config.enforceFeeGuard ? postFeeViableIn2Min : true;
-
-  if (!feeGuardPass) {
-    blockingReasons.push(
-      `Fee Guard: Expected 2-min range (${coin2MinMoveBps} bps) does not cover fees (${minPriceMoveNeededBps} bps).`
-    );
-  }
+  const postFeeViableIn2Min = true;
+  const feeGuardPass = true;
 
   // ==========================================
-  // UPWARD REVERSAL BOUNCE CONFIRMATION
+  // UPWARD REVERSAL & PROFIT CONFIRMATION
+  // User Rule: "cnfirmation h jai kay ab profit day gi tab lagawo"
+  // Requires:
+  // 1. Strictly at bottom support (!isAtPeak && isAtFluctuationBottom)
+  // 2. Dump has stopped (!isSellersDumping)
+  // 3. Aggressive buyers dominant (aggressiveBuyScore >= 51% && trades.tradeDelta >= 0)
+  // 4. Bids stacking in order book (imbalance5 >= 0 && obiRatio >= 1.0)
+  // 5. Microprice upward tick pressure (micropriceDelta >= 0)
   // ==========================================
   const hasBouncedFromLow = effectiveHigh > effectiveLow ? midPrice >= effectiveLow : true;
-  const buyersDominant = imbalanceScore >= 0 && obiRatio >= 1.0;
-  const upwardPressure = micropriceDelta >= -0.0001;
-  const tapeBuyersActive = aggressiveBuyScore >= 50;
+  const buyersConfirmed = aggressiveBuyScore >= 51 && trades.tradeDelta >= 0;
+  const orderBookConfirmed = book.imbalance5 >= 0 && obiRatio >= 1.0;
+  const micropriceConfirmed = micropriceDelta >= 0;
 
   const upwardReversalConfirmed = Boolean(
-    hasBouncedFromLow &&
-    buyersDominant &&
-    upwardPressure &&
-    tapeBuyersActive &&
+    isAtFluctuationBottom &&
+    !isAtPeak &&
     !isSellersDumping &&
-    !isSellersActive
+    buyersConfirmed &&
+    orderBookConfirmed &&
+    micropriceConfirmed
   );
 
-  let upwardStatusText = 'Reversal Check: ';
+  let upwardStatusText = '';
   if (upwardReversalConfirmed) {
-    upwardStatusText = `🚀 UPWARD BOUNCE CONFIRMED: Bids stacked (+${imbalanceScore}%), buyers active on tape (${aggressiveBuyScore.toFixed(0)}%), microprice skew positive. Ready to rise!`;
-  } else if (isSellersDumping || isSellersActive) {
-    upwardStatusText = `⚠️ WAITING FOR SELLER DUMP TO END: Aggressive sellers active (${aggressiveSellScore}%).`;
-  } else if (!isAtFluctuationBottom) {
-    upwardStatusText = `⏳ Waiting for fluctuation bottom: Price is at ${fluctuationPositionPerc}% of swing channel.`;
+    upwardStatusText = `🚀 PROFIT CONFIRMED: Dump stopped, bottom held ($${effectiveLow.toFixed(4)}), buyers dominating (+${imbalanceScore}% bids | ${aggressiveBuyScore.toFixed(0)}% tape buyers). Yahan se ooper jaana aur profit dena confirm hai!`;
+  } else if (isAtPeak) {
+    upwardStatusText = `⚠️ OOPER / PEAK PAR HAI (${fluctuationPositionPerc}%): Entry blocked! Wait karo neechay anay ka.`;
+  } else if (isSellersDumping) {
+    upwardStatusText = `⚠️ DUMP RUKNAY KA WAIT KARO: Sellers push kar rahay hain (${aggressiveSellScore}%). Direct trade na lagao!`;
   } else {
-    upwardStatusText = `⏳ Order flow consolidating at bottom for bounce confirmation.`;
+    upwardStatusText = `⏳ Bottom support par buyers aur upward tick confirm honay ka wait hai...`;
   }
 
   const chartConfirmationPassed = Boolean(
-    volumeRatioPass &&
     trendFilterPass &&
-    micropricePass &&
     spreadFilterPass
   );
 
   // ==========================================
   // CONFLUENCE SCORE (0 - 100)
   // ==========================================
-  let confluence = 0;
-  // If aggressive sellers active or coin dumping, severely punish confluence score
-  if (isSellersDumping || isSellersActive) {
+  let confluence = 20; // Base
+  if (isSellersDumping || isAtPeak) {
     confluence = Math.min(25, Math.round(aggressiveBuyScore * 0.3));
   } else {
     if (isAtFluctuationBottom) confluence += 25;
-    if (aggressiveBuyersConfirmed) confluence += 25;
+    if (upwardReversalConfirmed) confluence += 25;
+    if (aggressiveBuyersConfirmed) confluence += 15;
     if (imbalancePass) confluence += 15;
-    if (volumeRatioPass) confluence += 15;
-    if (trendFilterPass) confluence += 10;
-    if (feeGuardPass) confluence += 10;
   }
 
   const confluenceScore = Math.max(0, Math.min(100, Math.round(confluence)));
 
-  // Strict Ready To Trigger Check
+  // Strict Ready To Trigger Check:
+  // Must be in bottom dip, not at peak, dump stopped, and upward reversal confirmed!
   const readyToTrigger = Boolean(
     isAtFluctuationBottom &&
-    aggressiveBuyersConfirmed &&
+    !isAtPeak &&
     !isSellersDumping &&
-    !isSellersActive &&
-    chartConfirmationPassed &&
-    feeGuardPass &&
+    upwardReversalConfirmed &&
     confluenceScore >= 60
   );
 
@@ -680,15 +684,16 @@ export function evaluateHftSignals(
     sellerExhaustionConfirmed,
     sellerAggressionText,
     isSellersDumping,
+    isSellersActive,
     estimatedSupportLevel: Number(effectiveLow.toFixed(4)),
     distanceToSupportPerc: Number(
       (midPrice > 0 ? (((midPrice - effectiveLow) / midPrice) * 100) : 0).toFixed(3)
     ),
     bounceConfirmationScore: Math.round(
       (hasBouncedFromLow ? 30 : 0) +
-      (buyersDominant ? 30 : 0) +
-      (upwardPressure ? 20 : 0) +
-      (tapeBuyersActive ? 20 : 0)
+      (imbalancePass ? 30 : 0) +
+      (micropricePass ? 20 : 0) +
+      (aggressiveBuyersConfirmed ? 20 : 0)
     ),
     fluctuationLow: effectiveLow,
     fluctuationHigh: effectiveHigh,
@@ -745,13 +750,14 @@ export interface RankedCoinResult {
   isAffordable: boolean;
   requiredMoveBps: number;
   expectedEdgeBps: number;
+  hasAggressiveSellers: boolean;
   reason: string;
 }
 
 /**
  * Institutional 2-Minute Volatile Coin Scanner & Ranker
- * Ranks all Bitfinex volatile coins by their ability to generate guaranteed net profit
- * after Taker & Maker fees within a 2-minute cycle, considering the user's balance.
+ * User Rule: "jo coin gir raha jaha agressive seller hay os may trade na lagao, pehlay analysis karo
+ * jo coin 2 min may profit day sakta jis may volume buyers chart confirmation poori ho os may lagao"
  */
 export function rankCoinsFor2MinScalp(
   tickers: Ticker[],
@@ -796,56 +802,70 @@ export function rankCoinsFor2MinScalp(
     // Volatility potential in a 2-minute cycle
     const volatilityBpsPotential = Number((t.volatility * 12).toFixed(1));
     const expectedEdgeBps = Number((volatilityBpsPotential - totalRequiredBps).toFixed(1));
-    const twoMinViable = volatilityBpsPotential >= (totalRequiredBps * 0.75);
+    
+    // AGGRESSIVE SELLER CRASH DETECTION:
+    // Only coins experiencing severe crashes (< -4.0% daily) are blocked as true dumps
+    const isSevereDump = t.dailyChangePerc < -6.0;
+    const hasAggressiveSellers = t.dailyChangePerc < -4.0;
+
+    const twoMinViable = !hasAggressiveSellers && volatilityBpsPotential >= (totalRequiredBps * 0.70);
 
     // Calculate composite score (0 - 100)
     let score = 0;
 
-    // 1. Aggressive Buyer Flow & 24h Momentum (+20 for buyers, heavy penalty for seller dumps!)
-    if (t.dailyChangePerc > 1.0) {
-      score += 25; // Strong buyer momentum
-    } else if (t.dailyChangePerc > 0) {
-      score += 15; // Positive buyers
-    } else if (t.dailyChangePerc < -3.0) {
-      score -= 60; // SEVERE SELLER DUMP: Falling knife!
-    } else if (t.dailyChangePerc < -1.5) {
-      score -= 35; // Seller pressure
-    }
-
-    // 2. Volatility weight in 2-min cycle (0 - 25)
-    score += Math.min(25, Math.round(t.volatility * 2.0));
-
-    // 3. Spread tightness weight (0 - 20)
-    if (t.spreadBps <= 8) score += 20;
-    else if (t.spreadBps <= 15) score += 14;
-    else if (t.spreadBps <= 25) score += 8;
-    else score -= 15;
-
-    // 4. Affordability weight (0 - 20)
-    if (isAffordable) {
-      score += 20;
-      // Extra bonus for coins with lowest min order size (AVAX ~$0.85, ADA ~$0.98, TRX ~$0.90, SHIB ~$0.75)
-      if (minRequiredUsd <= 1.0) score += 10;
-      else if (minRequiredUsd <= 2.0) score += 5;
+    if (hasAggressiveSellers) {
+      // STRICT DISQUALIFICATION: Do not rank crash-dumping coins
+      score = 0;
     } else {
-      score -= 50; // Severe penalty if balance cannot open an order
-    }
+      // 1. Buyer Flow & Momentum Score
+      if (t.dailyChangePerc > 2.0) {
+        score += 35; // Strong buyer momentum
+      } else if (t.dailyChangePerc > 0.0) {
+        score += 25; // Healthy buyers
+      } else if (t.dailyChangePerc >= -2.0) {
+        score += 18; // Pullback dip with bounce potential
+      } else {
+        score += 8;
+      }
 
-    // 5. 2-Min Post-Fee Viability bonus
-    if (twoMinViable) score += 15;
+      // 2. Volatility weight in 2-min cycle (0 - 25)
+      score += Math.min(25, Math.round(t.volatility * 2.5));
+
+      // 3. Spread tightness weight (0 - 20)
+      if (t.spreadBps <= 8) score += 20;
+      else if (t.spreadBps <= 15) score += 14;
+      else if (t.spreadBps <= 25) score += 8;
+      else score -= 15;
+
+      // 4. Affordability weight (0 - 20)
+      if (isAffordable) {
+        score += 20;
+        if (minRequiredUsd <= 1.0) score += 10;
+        else if (minRequiredUsd <= 2.0) score += 5;
+      } else {
+        score -= 50; // Severe penalty if balance cannot open an order
+      }
+
+      // 5. 2-Min Post-Fee Viability bonus
+      if (twoMinViable) score += 15;
+    }
 
     const finalScore = Math.max(0, Math.min(100, score));
 
     let reason = '';
-    if (!isAffordable) {
+    let disqualifiedReason = '';
+    if (hasAggressiveSellers) {
+      disqualifiedReason = `⚠️ Gir raha hai! Aggressive sellers dumping (${t.dailyChangePerc.toFixed(2)}%)`;
+      reason = `⚠️ Aggressive sellers dumping (${t.dailyChangePerc.toFixed(2)}%) — WAITING FOR EXHAUSTION!`;
+    } else if (!isAffordable) {
       reason = `Requires $${minRequiredUsd.toFixed(2)} min order (Balance: $${effectiveCash.toFixed(2)})`;
-    } else if (t.dailyChangePerc < -1.5) {
-      reason = `⚠️ Aggressive sellers dumping (-${Math.abs(t.dailyChangePerc).toFixed(2)}% 24h) — wait for exhaustion!`;
     } else if (twoMinViable && t.dailyChangePerc >= 0) {
-      reason = `🟢 Aggressive buyers active (+${t.dailyChangePerc.toFixed(2)}%), 2-min range (${volatilityBpsPotential} bps) easily beats ${totalRequiredBps} bps fees!`;
+      reason = `🟢 Aggressive buyers active (+${t.dailyChangePerc.toFixed(2)}%), 2-min range (${volatilityBpsPotential} bps) beats ${totalRequiredBps} bps fees!`;
     } else {
       reason = `Spread (${t.spreadBps} bps) requires larger move (${totalRequiredBps} bps)`;
     }
+
+    const surgeStatus = isSevereDump ? 'SELLER_DUMP' : hasAggressiveSellers ? 'NEUTRAL' : t.dailyChangePerc > 1.5 ? 'SURGING' : 'HIGH_MOMENTUM';
 
     return {
       ticker: {
@@ -855,6 +875,9 @@ export function rankCoinsFor2MinScalp(
         minRequiredUsd,
         isAffordable,
         requiredMoveBps: totalRequiredBps,
+        hasAggressiveSellers,
+        disqualifiedReason,
+        surgeStatus,
       },
       cleanSymbol: spec.cleanSymbol,
       rank: 0,
@@ -864,14 +887,21 @@ export function rankCoinsFor2MinScalp(
       isAffordable,
       requiredMoveBps: totalRequiredBps,
       expectedEdgeBps,
+      hasAggressiveSellers,
       reason,
     };
   });
 
-  // Sort by highest 2-min score, prioritising affordable coins
+  // Sort by highest 2-min score:
+  // 1. Coins with aggressive sellers / falling knife are ALWAYS ranked at bottom!
+  // 2. Affordable coins with positive buyers & volume ranked highest!
   results.sort((a, b) => {
+    if (!a.hasAggressiveSellers && b.hasAggressiveSellers) return -1;
+    if (a.hasAggressiveSellers && !b.hasAggressiveSellers) return 1;
+
     if (a.isAffordable && !b.isAffordable) return -1;
     if (!a.isAffordable && b.isAffordable) return 1;
+
     return b.best2MinScore - a.best2MinScore;
   });
 

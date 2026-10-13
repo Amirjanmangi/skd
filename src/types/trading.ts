@@ -16,12 +16,14 @@ export interface Ticker {
   volatility: number;
   surgeScore?: number;
   surgeRank?: number;
-  surgeStatus?: 'SURGING' | 'HIGH_MOMENTUM' | 'NEUTRAL';
+  surgeStatus?: 'SURGING' | 'HIGH_MOMENTUM' | 'NEUTRAL' | 'SELLER_DUMP';
   best2MinScore?: number;
   twoMinViable?: boolean;
   minRequiredUsd?: number;
   isAffordable?: boolean;
   requiredMoveBps?: number;
+  hasAggressiveSellers?: boolean;
+  disqualifiedReason?: string;
 }
 
 export interface OrderBookLevel {
@@ -204,6 +206,7 @@ export interface HftSignals {
   sellerExhaustionConfirmed: boolean;
   sellerAggressionText: string;
   isSellersDumping: boolean;
+  isSellersActive: boolean;
   estimatedSupportLevel: number;
   distanceToSupportPerc: number;
   bounceConfirmationScore: number;

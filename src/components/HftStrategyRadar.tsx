@@ -56,7 +56,12 @@ export const HftStrategyRadar: React.FC<HftStrategyRadarProps> = ({
               TARGET COIN: {config.symbol}
             </span>
             <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
-              2-MIN TARGET: +${(config.targetProfitUsd || 0.00004).toFixed(6)} NET (POST TAKER &amp; MAKER FEES)
+              {config.symbol.toUpperCase().includes('ETH')
+                ? 'ETH TARGET: ENTRY + $4.00 (INSTANT EXIT & NEXT TRADE)'
+                : `2-MIN TARGET: +$${(config.targetProfitUsd || 0.00004).toFixed(6)} NET (POST TAKER & MAKER FEES)`}
+            </span>
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold">
+              🛡️ STOP LOSS REMOVED (HOLD TILL PROFIT TARGET)
             </span>
             {signals.readyToTrigger ? (
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-bold animate-pulse flex items-center gap-1">
@@ -125,7 +130,9 @@ export const HftStrategyRadar: React.FC<HftStrategyRadarProps> = ({
             <div className="flex items-center gap-1.5">
               <span className="text-slate-500 font-mono text-[11px]">Net Scalp Target:</span>
               <span className="font-mono font-bold text-cyan-400">
-                +${(config.targetProfitUsd || 0.00004).toFixed(6)} USD
+                {config.symbol.toUpperCase().includes('ETH')
+                  ? 'ETH Entry + $4.00 (Exit & Next Trade)'
+                  : `+$${(config.targetProfitUsd || 0.00004).toFixed(6)} USD`}
               </span>
             </div>
           </div>

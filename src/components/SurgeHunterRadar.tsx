@@ -96,28 +96,49 @@ export const SurgeHunterRadar: React.FC<SurgeHunterRadarProps> = ({
 
       {/* Top 2-Min Volatile Coin Spotlight Banner */}
       {topSurging && (
-        <div className="mt-3 p-3 rounded-lg bg-gradient-to-r from-emerald-950/30 via-slate-900 to-amber-950/20 border border-emerald-500/40 flex flex-wrap items-center justify-between gap-3 shadow-md">
+        <div className={`mt-3 p-3 rounded-lg border flex flex-wrap items-center justify-between gap-3 shadow-md ${
+          topSurging.hasAggressiveSellers
+            ? 'bg-gradient-to-r from-rose-950/40 via-slate-900 to-amber-950/20 border-rose-500/50'
+            : 'bg-gradient-to-r from-emerald-950/30 via-slate-900 to-amber-950/20 border-emerald-500/40'
+        }`}>
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-300 font-mono font-bold text-sm">
+            <div className={`w-10 h-10 rounded-xl border flex items-center justify-center font-mono font-bold text-sm ${
+              topSurging.hasAggressiveSellers
+                ? 'bg-rose-500/20 border-rose-500/40 text-rose-300'
+                : 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+            }`}>
               #1
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="font-bold text-sm text-white font-mono">{topSurging.cleanSymbol}</span>
-                <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold font-mono border border-emerald-500/40">
-                  TOP 2-MIN PROFIT COIN
-                </span>
+                {topSurging.hasAggressiveSellers ? (
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold font-mono border border-rose-500/40">
+                    ⚠️ SELLER DUMP DETECTED — WAITING FOR BUYERS
+                  </span>
+                ) : (
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold font-mono border border-emerald-500/40">
+                    🟢 CONFIRMED 2-MIN PROFIT COIN
+                  </span>
+                )}
                 <span className="text-xs font-mono text-emerald-400 font-semibold">
                   +{(topSurging.volatility).toFixed(1)}% Volatility
                 </span>
                 {topSurging.best2MinScore !== undefined && (
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-bold">
+                  <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border font-bold ${
+                    topSurging.hasAggressiveSellers
+                      ? 'bg-slate-800 text-slate-400 border-slate-700'
+                      : 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                  }`}>
                     Score: {topSurging.best2MinScore}/100
                   </span>
                 )}
               </div>
               <p className="text-[11px] text-slate-300 font-mono mt-0.5">
                 Mark: ${topSurging.lastPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })} &bull; Spread: {topSurging.spreadBps} bps &bull; Min Order: ${topSurging.minRequiredUsd ?? 0.85} &bull; 2-Min Net Target: <strong className="text-emerald-400">+$0.000040</strong> (after Taker &amp; Maker fees)
+                {topSurging.disqualifiedReason && (
+                  <span className="text-rose-400 ml-1.5">&bull; {topSurging.disqualifiedReason}</span>
+                )}
               </p>
             </div>
           </div>
@@ -143,6 +164,7 @@ export const SurgeHunterRadar: React.FC<SurgeHunterRadarProps> = ({
         {sortedTickers.slice(0, 8).map((ticker, idx) => {
           const isSelected = ticker.symbol === activeSymbol;
           const isPositive = ticker.dailyChangePerc >= 0;
+          const isBlocked = ticker.hasAggressiveSellers;
 
           return (
             <button
@@ -151,6 +173,8 @@ export const SurgeHunterRadar: React.FC<SurgeHunterRadarProps> = ({
               className={`p-2.5 rounded-lg border text-left transition-all ${
                 isSelected
                   ? 'bg-slate-800 border-emerald-500/60 ring-1 ring-emerald-500/40 shadow-sm shadow-emerald-500/10'
+                  : isBlocked
+                  ? 'bg-rose-950/20 hover:bg-rose-950/30 border-rose-900/40 opacity-80'
                   : 'bg-slate-950/70 hover:bg-slate-900 border-slate-800'
               }`}
             >
@@ -164,7 +188,7 @@ export const SurgeHunterRadar: React.FC<SurgeHunterRadarProps> = ({
               </div>
 
               <div className="flex items-center justify-between text-[10px] font-mono mt-1">
-                <span className={isPositive ? 'text-emerald-400' : 'text-rose-400'}>
+                <span className={isPositive ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
                   {isPositive ? '+' : ''}{ticker.dailyChangePerc.toFixed(1)}%
                 </span>
                 <span className="text-slate-400">
@@ -174,8 +198,14 @@ export const SurgeHunterRadar: React.FC<SurgeHunterRadarProps> = ({
 
               <div className="mt-1 pt-1 border-t border-slate-800/80 flex items-center justify-between text-[9px] font-mono">
                 <span className="text-slate-500">Min: ${ticker.minRequiredUsd ?? 1}</span>
-                <span className={ticker.twoMinViable ? 'text-emerald-400 font-bold' : 'text-amber-400'}>
-                  {ticker.twoMinViable ? '2m Win' : `${ticker.spreadBps}bps`}
+                <span className={
+                  isBlocked
+                    ? 'text-rose-400 font-bold'
+                    : ticker.twoMinViable
+                    ? 'text-emerald-400 font-bold'
+                    : 'text-amber-400'
+                }>
+                  {isBlocked ? '⚠️ Dump' : ticker.twoMinViable ? '✓ 2m Win' : `${ticker.spreadBps}bps`}
                 </span>
               </div>
             </button>

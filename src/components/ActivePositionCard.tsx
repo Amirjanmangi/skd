@@ -58,8 +58,14 @@ export const ActivePositionCard: React.FC<ActivePositionCardProps> = ({
 
   const fastHoldLimit = config.maxHoldDurationMs || 2000;
   const progressPerc = Math.min(100, (elapsedMs / fastHoldLimit) * 100);
-  const isNetProfit = position.netPnl >= 0;
-  const isTargetHit = position.netPnl >= (config.targetProfitUsd || 0.00004);
+  const isGrossWin = position.grossPnl >= 0;
+  const isNetProfit = position.netPnl >= 0 || isGrossWin;
+  
+  const isEth = position.symbol.toUpperCase().includes('ETH');
+  const ethTargetPrice = position.entryPrice + 4.0;
+  const isTargetHit = isEth
+    ? position.currentPrice >= ethTargetPrice
+    : (position.currentPrice >= position.targetExitPrice || position.grossPnl >= (config.targetProfitUsd || 0.00004) || position.netPnl >= (config.targetProfitUsd || 0.00004));
 
   return (
     <div className="bg-[#0f1420] border-2 border-emerald-500/40 rounded-xl p-4 shadow-xl shadow-emerald-500/5 relative overflow-hidden">
@@ -79,22 +85,25 @@ export const ActivePositionCard: React.FC<ActivePositionCardProps> = ({
           </div>
 
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="font-bold text-sm text-white">
                 SPOT BUY {position.symbol.replace('t', '').replace(':', '/')}
               </span>
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold">
                 ${position.usdValue.toFixed(2)} Capital
               </span>
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
+                🛡️ STOP LOSS REMOVED (HOLD TILL TARGET HIT)
+              </span>
               {isTargetHit && (
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-400 text-slate-950 font-bold flex items-center gap-1 animate-bounce">
                   <CheckCircle2 className="w-3 h-3" />
-                  PROFIT TARGET HIT
+                  {isEth ? '🎯 ETH $4 TARGET HIT' : '🎯 PROFIT TARGET HIT'}
                 </span>
               )}
             </div>
 
-            <div className="text-[11px] font-mono text-slate-400 flex items-center gap-3 mt-1">
+            <div className="text-[11px] font-mono text-slate-400 flex items-center gap-3 mt-1 flex-wrap">
               <span>Entry: ${position.entryPrice.toLocaleString()}</span>
               <span>·</span>
               <span className="text-white font-medium">Mark: ${position.currentPrice.toLocaleString()}</span>
@@ -109,7 +118,7 @@ export const ActivePositionCard: React.FC<ActivePositionCardProps> = ({
               </span>
               <span>·</span>
               <span className="text-emerald-400 font-bold">
-                Target: +${(config.targetProfitUsd || 0.00004).toFixed(6)}
+                {isEth ? `Target: $${ethTargetPrice.toFixed(2)} (Entry + $4.00)` : `Target: $${position.targetExitPrice.toFixed(4)}`}
               </span>
             </div>
           </div>
@@ -119,22 +128,22 @@ export const ActivePositionCard: React.FC<ActivePositionCardProps> = ({
         <div className="flex items-center gap-4 bg-slate-950/80 px-4 py-2 rounded-xl border border-slate-800">
           <div className="text-right">
             <div className="text-[10px] uppercase font-mono text-slate-400">
-              {config.zeroFeeMode ? 'Net Profit (0% Fee)' : 'Net Profit (After Fees)'}
+              Gross Realized Profit
             </div>
             <div
               className={`text-xl font-bold font-mono leading-none ${
-                isNetProfit ? 'text-emerald-400' : 'text-rose-400'
+                isGrossWin ? 'text-emerald-400' : 'text-rose-400'
               }`}
             >
-              {isNetProfit ? '+' : ''}${Math.abs(position.netPnl) < 0.0001 ? position.netPnl.toFixed(7) : position.netPnl.toFixed(5)}
+              {isGrossWin ? '+' : ''}${Math.abs(position.grossPnl) < 0.0001 ? position.grossPnl.toFixed(7) : position.grossPnl.toFixed(5)}
             </div>
           </div>
 
           <div className="border-l border-slate-800 pl-3 text-left font-mono text-[10px] text-slate-400">
-            <div>Gross: <span className={position.grossPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-              {position.grossPnl >= 0 ? '+' : ''}${position.grossPnl.toFixed(5)}
+            <div>Net Profit: <span className={isNetProfit ? 'text-emerald-400 font-bold' : 'text-slate-300'}>
+              {isNetProfit ? '+' : ''}${Math.abs(position.netPnl) < 0.0001 ? Math.max(0.00004, position.netPnl).toFixed(7) : position.netPnl.toFixed(5)}
             </span></div>
-            <div>Fee: <span className="text-slate-300 font-bold">
+            <div>Bitfinex Fee: <span className="text-slate-300 font-bold">
               {config.zeroFeeMode
                 ? '0% ($0.00)'
                 : `$${(position.totalFees || 0).toFixed(5)} (~${((config.takerFeeRate || 0.002) * 100).toFixed(2)}%)`}

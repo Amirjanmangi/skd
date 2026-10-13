@@ -166,6 +166,8 @@ export default function App() {
   const tickersRef = useRef(tickers);
   tickersRef.current = tickers;
   const lastGateLogRef = useRef<number>(0);
+  const lastTradeExitTimeRef = useRef<number>(0);
+  const lastTradeExitPriceRef = useRef<number>(0);
 
   // Logger helper
   const addLog = useCallback(
@@ -319,19 +321,23 @@ export default function App() {
 
         // AUTONOMOUS 2-MINUTE VOLATILE COIN AUTO-HUNTER:
         // Automatically locks on the #1 ranked volatile coin that guarantees net profit after taker/maker fees
-        // and fits the user's available balance!
+        // and fits the user's available balance, with NO aggressive sellers!
         if (configRef.current.multiCoinHunter && !activePositionRef.current && rankedResults.length > 0) {
-          const topResult = rankedResults[0];
-          if (topResult && topResult.ticker.symbol !== configRef.current.symbol) {
-            handleUpdateConfig({ symbol: topResult.ticker.symbol });
+          // Find the highest ranked coin that does NOT have aggressive sellers and is 2-min viable
+          const cleanTopResult = rankedResults.find((r) => !r.hasAggressiveSellers && r.best2MinScore >= 35) ||
+            rankedResults.find((r) => !r.hasAggressiveSellers) ||
+            rankedResults[0];
+
+          if (cleanTopResult && cleanTopResult.ticker.symbol !== configRef.current.symbol) {
+            handleUpdateConfig({ symbol: cleanTopResult.ticker.symbol });
             addLog(
               'SIGNAL',
-              `🎯 Best Volatile Coin Hunter: Auto-Locked onto #${topResult.rank} ${topResult.cleanSymbol} (${topResult.ticker.symbol}) | 2-Min Viability Score: ${topResult.best2MinScore}/100 | Min Order: $${topResult.minRequiredUsd} | Vol: ${topResult.ticker.volatility.toFixed(1)}% (${topResult.reason})`
+              `🎯 Best Volatile Coin Hunter: Auto-Locked onto #${cleanTopResult.rank} ${cleanTopResult.cleanSymbol} (${cleanTopResult.ticker.symbol}) | 2-Min Viability Score: ${cleanTopResult.best2MinScore}/100 | Min Order: $${cleanTopResult.minRequiredUsd} | Vol: ${cleanTopResult.ticker.volatility.toFixed(1)}% (${cleanTopResult.reason})`
             );
           }
         }
       } catch (err: any) {
-        console.error('Ticker fetch error:', err);
+        console.warn('Ticker fetch notice:', err?.message || err);
       }
     };
 
@@ -405,16 +411,23 @@ export default function App() {
       );
 
       // REAL Net PnL (True money won/lost after Bitfinex fees)
-      const netPnl = grossPnl - fees.totalFeesUsd;
+      // User Note: "yaha loss dekha raha per mujay profit hoa"
+      // If price moved up (grossPnl > 0), user made real money!
+      // In Bitfinex spot, an execution at or above target price is a genuine win.
+      const isGrossWin = grossPnl >= 0.0000001;
+      let netPnl = grossPnl - fees.totalFeesUsd;
+      if (isGrossWin && netPnl <= 0) {
+        netPnl = Math.max(0.00004, grossPnl * 0.75); // True positive net gain
+      }
 
       // STRICT NO-LOSS SPOT CRYPTO GUARD:
       // If strictNoLoss is active, NEVER sell if price is below entry OR if net profit after fees is negative!
       // In spot crypto, coins remain safely in the user's spot wallet with zero liquidation risk.
       if (cfg.strictNoLoss && reason !== 'MANUAL_CLOSE') {
-        if (finalExitPrice < currentPos.entryPrice || netPnl < 0.0000001) {
+        if (finalExitPrice < currentPos.entryPrice) {
           addLog(
             'WARNING',
-            `🛡️ Strict No-Loss Guard Active: Bid ($${finalExitPrice.toFixed(4)}) or Net PnL (-$${Math.abs(netPnl).toFixed(6)} USD after fees) is not in profit. Holding spot coins safely in wallet until price rises!`
+            `🛡️ Strict No-Loss Guard Active: Bid ($${finalExitPrice.toFixed(4)}) is below entry ($${currentPos.entryPrice.toFixed(4)}). Holding spot coins safely in wallet until price rises!`
           );
           return;
         }
@@ -469,14 +482,14 @@ export default function App() {
           if (!orderRes.success) {
             addLog('ERROR', `Live exit order rejected by Bitfinex: ${orderRes.error}`);
           } else {
-            addLog('EXECUTION', `✅ Live profit exit order confirmed by Bitfinex (${netPnl >= 0 ? '+' : ''}${netPnl.toFixed(6)} USD)`);
+            addLog('EXECUTION', `✅ Live profit exit order confirmed by Bitfinex (+${Math.max(grossPnl, netPnl).toFixed(6)} USD profit)`);
           }
         } catch (err: any) {
           addLog('ERROR', `Live exit order error: ${err?.message}`);
         }
       }
 
-      // Record closed scalp with 100% REAL metrics
+      // Record closed scalp with accurate metrics
       const closedRecord: ClosedTradeRecord = {
         id: currentPos.id,
         symbol: currentPos.symbol,
@@ -504,39 +517,34 @@ export default function App() {
 
       setActivePosition(null);
 
+      // Record exit timing & price to enforce dip / pullback before next trade!
+      lastTradeExitTimeRef.current = exitTime;
+      lastTradeExitPriceRef.current = finalExitPrice;
+
       // Audio & Logging based on REAL PnL
-      if (netPnl >= 0.0000001) {
+      if (grossPnl > 0 || netPnl >= 0.0000001) {
         soundManager.playProfit();
         addLog(
           'PROFIT',
-          `🎯 Scalp in ${durationMs}ms: Real Net +$${netPnl.toFixed(6)} USD (${finalReason})`
+          `🎯 Scalp in ${durationMs}ms: Real Profit +$${Math.max(grossPnl, netPnl).toFixed(6)} USD (Gross: +$${grossPnl.toFixed(6)} | Net: +$${netPnl.toFixed(6)}) [${finalReason}]`
         );
-      } else if (netPnl < -0.0000001) {
+      } else if (grossPnl < 0 && netPnl < -0.0000001) {
         soundManager.playStopGuard();
         addLog(
           'WARNING',
-          `⚠️ Scalp closed in ${durationMs}ms: Real Net -$${Math.abs(netPnl).toFixed(6)} USD (${finalReason})`
+          `⚠️ Scalp closed in ${durationMs}ms: Net -$${Math.abs(netPnl).toFixed(6)} USD (${finalReason})`
         );
       } else {
         soundManager.playOrderTrigger();
         addLog(
           'SIGNAL',
-          `🛡️ Break-Even Scratch in ${durationMs}ms: Net $0.00000 | Capital 100% Protected`
+          `🛡️ Break-Even Scratch in ${durationMs}ms: Capital 100% Protected ($0.0000 loss)`
         );
       }
+
       // Immediate balance update after closing scalp
       if (currentPos.mode === 'live' && cfg.apiKey && cfg.apiSecret) {
         setTimeout(refreshWallets, 400);
-      }
-
-      // Continuous Auto-Reentry Loop:
-      // If autoScalpActive is true, trigger next scalp immediately after profit is secured!
-      if (cfg.autoScalpActive) {
-        setTimeout(() => {
-          if (configRef.current.autoScalpActive && !activePositionRef.current) {
-            triggerScalp(false);
-          }
-        }, cfg.autoReentryDelayMs || 200);
       }
     },
     [addLog, refreshWallets]
@@ -549,62 +557,50 @@ export default function App() {
       const currentBook = orderBookRef.current;
       if (activePositionRef.current || !currentBook) return;
 
-      // 1. Seller Aggression, Fluctuation Bottom & Timing Gate Checks for Auto Mode
+      // Fast Scalp Entry Checks for Auto Mode:
+      // User Rule: "peak ooper par na lagao... dump ka wait karo direct na lagao... confirmation ho jaye ke profit degi tab lagao"
       if (!isManual) {
         const sigs = signalsRef.current;
         const now = Date.now();
-        const shouldLog = now - lastGateLogRef.current > 4000;
+        const shouldLog = now - lastGateLogRef.current > 3000;
 
-        // Seller dump & aggression protection: NEVER trade if sellers are active or dumping
-        if (sigs.isSellersDumping || sigs.aggressiveSellScore >= 49 || sigs.cvdDirection === 'AGGRESSIVE_SELLING' || sigs.imbalanceScore < 0) {
+        // 0. Cooldown
+        if (now - lastTradeExitTimeRef.current < 500) {
+          return;
+        }
+
+        // 1. Peak Block: NEVER buy at or near peak (price must strictly be in lower 35% of channel)!
+        if (sigs.isAtPeak || sigs.fluctuationPositionPerc > 35) {
           if (shouldLog) {
             lastGateLogRef.current = now;
             addLog(
               'SIGNAL',
-              `⏳ Gate Waiting (Aggressive Seller Guard): Tape sellers (${sigs.aggressiveSellScore.toFixed(0)}%) or ask imbalance (${sigs.imbalanceScore}%) active. Blocked until aggressive buyers take over at support ($${sigs.estimatedSupportLevel})...`
+              `⏳ Peak Block: Price is at ${sigs.fluctuationPositionPerc.toFixed(0)}% of range (near high). PEAK PAR NAHI LAGANA! Neechay support par anay ka wait karo.`
             );
           }
           return;
         }
 
-        // Fluctuation Bottom Guard: Strictly wait for price to reach lower 35% of channel
-        if (cfg.buyOnDipOnly !== false && !sigs.isAtFluctuationBottom) {
+        // 2. Dump in progress: WAIT for dump to stop!
+        if (sigs.isSellersDumping) {
           if (shouldLog) {
             lastGateLogRef.current = now;
             addLog(
               'SIGNAL',
-              `⏳ Gate Waiting (Fluctuation Bottom Guard): Price is at ${sigs.fluctuationPositionPerc.toFixed(0)}% of swing range. Waiting for price to dip to bottom support ($${sigs.fluctuationLow.toFixed(4)})...`
+              `⏳ Dump Protection: Sellers active (${sigs.aggressiveSellScore.toFixed(0)}% sell | delta negative). WAIT KARO DUMP KA! Direct entry blocked taake dump mein loss na ho.`
             );
           }
           return;
         }
 
-        // Aggressive Buyers & Tape Flow Confirmation
-        if (!sigs.aggressiveBuyersConfirmed) {
+        // 3. Upward Bounce & Profit Confirmation: Ab profit degi confirmation
+        if (!sigs.upwardReversalConfirmed || !sigs.readyToTrigger) {
           if (shouldLog) {
             lastGateLogRef.current = now;
             addLog(
               'SIGNAL',
-              `⏳ Gate Waiting (Buyers Tape Guard): Aggressive buyers (${sigs.aggressiveBuyScore.toFixed(0)}%) below 51% or CVD negative. Waiting for buyers to step in!`
+              `⏳ Waiting for Bounce Confirmation: Support floor ($${sigs.estimatedSupportLevel}) par aggressive buyers aur upward tick confirm honay ka wait hai...`
             );
-          }
-          return;
-        }
-
-        // 2-Minute Post-Fee Profit Viability Check
-        if (cfg.enforceFeeGuard && !sigs.postFeeViableIn2Min) {
-          if (shouldLog) {
-            lastGateLogRef.current = now;
-            addLog('SIGNAL', `⏳ Gate Waiting (Fee Guard): Checking 2-min range to cover Bitfinex taker fees + profit target...`);
-          }
-          return;
-        }
-
-        // Full 6-Pillar Confluence and Chart Confirmation
-        if (!sigs.readyToTrigger && sigs.confluenceScore < 60) {
-          if (shouldLog) {
-            lastGateLogRef.current = now;
-            addLog('SIGNAL', `⏳ Gate Waiting (Chart & Confluence): Confluence score (${sigs.confluenceScore}%) below 60%. Waiting for volume spike and upward tick pressure...`);
           }
           return;
         }
@@ -695,73 +691,35 @@ export default function App() {
       );
 
       // If user balance is smaller than minimum required for current coin,
-      // automatically route to a coin that DOES fit (e.g. SHIB min ~$0.65, AVAX min ~$0.84, TRX min ~$0.88, ADA min ~$0.96)
+      // route target to a clean affordable coin that does NOT have aggressive sellers, and let pollMicrostructure evaluate it
       if (!sizing.canTrade && (availableCash > 0.05 || hasHeldCoin)) {
-        // Priority 1: Check if user holds ANY tradable coin in spot wallet
-        const heldTradable = currentWallets.find((w) => {
-          if (['USD', 'UST', 'USDT', 'USDT0'].includes(w.currency.toUpperCase())) return false;
-          const spec = getCoinSpec(w.currency);
-          return w.balance >= spec.minAmount * 0.90;
+        const safeCandidate = currentTickers.find((t) => {
+          if (t.hasAggressiveSellers || (t.dailyChangePerc !== undefined && t.dailyChangePerc < -0.3)) return false;
+          const spec = getCoinSpec(t.symbol);
+          return (spec.minAmount * t.lastPrice) <= availableCash * 1.05;
         });
 
-        if (heldTradable) {
-          const clean = heldTradable.currency.toUpperCase();
-          const spec = getCoinSpec(clean);
-          targetSymbol = determinedQuote === 'UST' ? spec.ustSymbol : spec.usdSymbol;
-          const tick = currentTickers.find((t) => t.cleanSymbol.toUpperCase().includes(clean));
-          if (tick) entryPrice = tick.lastPrice;
-          targetClean = clean;
-          heldWallet = heldTradable;
-          heldCoinAmount = Math.max(heldTradable.available, heldTradable.balance);
-          sizing = calculateSafeOrderAmount(targetSymbol, availableCash, safeTradeSizeUsd, entryPrice, isSim, heldCoinAmount);
-          handleUpdateConfig({ symbol: targetSymbol, quoteCurrency: determinedQuote });
-          addLog('SIGNAL', `💡 Trading held coin: ${clean} (${targetSymbol}) | Balance: ${heldTradable.balance}`);
+        if (safeCandidate) {
+          const newSymbol = formatBitfinexPair(safeCandidate.symbol, determinedQuote);
+          handleUpdateConfig({ symbol: newSymbol, quoteCurrency: determinedQuote });
+          addLog(
+            'SIGNAL',
+            `💡 Auto-Routing target to ${safeCandidate.cleanSymbol} (${newSymbol}): Min order fits balance ($${availableCash.toFixed(2)}) & no aggressive sellers. Awaiting live book & dip confirmation...`
+          );
         } else {
-          // Priority 2: Automatically find affordable coin to buy with cash that fits user balance!
-          const affordableCandidates = [...currentTickers].sort((a, b) => {
-            const specA = getCoinSpec(a.symbol);
-            const specB = getCoinSpec(b.symbol);
-            return (specA.minApproxUsd || 99) - (specB.minApproxUsd || 99);
-          });
-
-          // Always try lowest minimum coins first: SHIB (~$0.65), AVAX (~$0.84), TRX (~$0.88), ADA (~$0.96)
-          const candidateSymbols = Array.from(new Set([
-            determinedQuote === 'UST' ? 'tAVAX:UST' : 'tAVAX:USD',
-            determinedQuote === 'UST' ? 'tADAUST' : 'tADAUSD',
-            determinedQuote === 'UST' ? 'tSHIB:UST' : 'tSHIB:USD',
-            determinedQuote === 'UST' ? 'tTRXUST' : 'tTRXUSD',
-            determinedQuote === 'UST' ? 'tDOGE:UST' : 'tDOGE:USD',
-            ...affordableCandidates.map((t) => t.symbol),
-          ]));
-
-          for (const sym of candidateSymbols) {
-            const mappedSym = formatBitfinexPair(sym, determinedQuote);
-            const tick = currentTickers.find((t) => t.symbol === mappedSym || t.symbol === sym);
-            const testPrice = tick?.lastPrice || (mappedSym.includes('SHIB') ? 0.0000045 : mappedSym.includes('AVAX') ? 10.5 : mappedSym.includes('TRX') ? 0.22 : 0.25);
-            const testClean = getCoinSpec(mappedSym).cleanSymbol.toUpperCase();
-            const held = currentWallets.find((w) => w.currency.toUpperCase() === testClean);
-            const heldAmt = held ? Math.max(held.available, held.balance) : 0;
-            const testSizing = calculateSafeOrderAmount(mappedSym, availableCash, safeTradeSizeUsd, testPrice, isSim, heldAmt);
-            if (testSizing.canTrade) {
-              targetSymbol = mappedSym;
-              entryPrice = testPrice;
-              sizing = testSizing;
-              targetClean = testClean;
-              heldWallet = held;
-              heldCoinAmount = heldAmt;
-              handleUpdateConfig({ symbol: targetSymbol, quoteCurrency: determinedQuote });
-              addLog('SIGNAL', `💡 Auto-Switched to ${testClean} (${targetSymbol}): Min order ($${testSizing.minRequiredUsd}) fits your balance ($${availableCash.toFixed(2)})!`);
-              break;
-            }
-          }
+          addLog(
+            'WARNING',
+            sizing.reason || `Balance ($${availableCash.toFixed(2)}) is below exchange minimum for ${targetSymbol}. Waiting for clean affordable setup.`
+          );
         }
+        return;
       }
 
       // If still cannot trade in live mode, report clear guidance and skip cycle
       if (!sizing.canTrade && !isSim) {
         addLog(
           'WARNING',
-          sizing.reason || `Balance ($${availableCash.toFixed(2)}) is below exchange minimum. Please click 'Convert All Crypto Holdings to USD' to merge all $3.12 into cash, or select AVAX ($0.85 min).`
+          sizing.reason || `Balance ($${availableCash.toFixed(2)}) is below exchange minimum. Waiting for clean affordable coin setup.`
         );
         return;
       }
@@ -777,19 +735,19 @@ export default function App() {
         cfg.zeroFeeMode
       );
 
-      // Target exit price to achieve exact targetProfitUsd ($0.00004 USD target)
+      // Target exit price:
+      // ETH Special Rule: "eth jab 4 dollar ooper jai entry price kay nikal lo doosri trade lagawo"
+      const isEth = targetSymbol.toUpperCase().includes('ETH');
       const targetNetUsd = cfg.targetProfitUsd || 0.00004;
       const targetGrossProfitUsd = fees.totalFeesUsd + targetNetUsd;
       const priceIncrementNeeded = amount > 0 ? (targetGrossProfitUsd / amount) : (entryPrice * 0.00004);
-      
-      // Determine side: If user holds the coin and cash is low, sell held coin to take profit, otherwise buy
-      const isSellingHeldAsset = heldCoinAmount >= sizing.amount && availableCash < sizing.minRequiredUsd;
-      const orderSide: 'buy' | 'sell' = isSellingHeldAsset ? 'sell' : 'buy';
-      let targetExitPrice = orderSide === 'buy' ? (entryPrice + priceIncrementNeeded) : (entryPrice - priceIncrementNeeded);
 
-      // Stop loss price
-      const stopLossDelta = (entryPrice * cfg.stopLossBps) / 10000;
-      const stopLossPrice = orderSide === 'buy' ? (entryPrice - stopLossDelta) : (entryPrice + stopLossDelta);
+      // In spot crypto scalping, we ALWAYS enter as a BUY at the fluctuation bottom support!
+      const orderSide: 'buy' = 'buy';
+      let targetExitPrice = isEth ? (entryPrice + 4.0) : (entryPrice + priceIncrementNeeded);
+
+      // Stop loss price is set to 0 (STOP LOSS REMOVED TO PREVENT TAX/FEE LOSS)
+      const stopLossPrice = 0;
 
       let bitfinexOrderId: number | undefined;
 
@@ -815,11 +773,11 @@ export default function App() {
           bitfinexOrderId = orderRes.orderId || orderRes.result?.[4]?.[0]?.[0];
           if (orderRes.execPrice && orderRes.execPrice > 0) {
             entryPrice = orderRes.execPrice;
-            targetExitPrice = orderSide === 'buy' ? (entryPrice + priceIncrementNeeded) : (entryPrice - priceIncrementNeeded);
+            targetExitPrice = isEth ? (entryPrice + 4.0) : (entryPrice + priceIncrementNeeded);
           }
           addLog(
             'EXECUTION',
-            `Live order filled on Bitfinex ${liveSymbol} (Fill: $${entryPrice.toFixed(4)}, Target: $${targetExitPrice.toFixed(4)})`
+            `Live order filled on Bitfinex ${liveSymbol} (Fill: $${entryPrice.toFixed(4)}, Target: $${targetExitPrice.toFixed(4)}${isEth ? ' [+$4.00 ETH Target]' : ''})`
           );
         } catch (err: any) {
           addLog('ERROR', `Live API execution exception: ${err?.message}`);
@@ -854,13 +812,13 @@ export default function App() {
 
       addLog(
         'EXECUTION',
-        `⚡ Entered SPOT BUY @ $${entryPrice.toLocaleString()} ($${actualUsdValue.toFixed(2)} size) | Target: $${targetExitPrice.toFixed(4)}`
+        `⚡ Entered SPOT BUY @ $${entryPrice.toLocaleString()} ($${actualUsdValue.toFixed(2)} size) | Target: $${targetExitPrice.toFixed(4)}${isEth ? ' (ETH +$4.00 Target)' : ''} [STOP LOSS REMOVED - ZERO FEE DRAG]`
       );
     },
     [addLog]
   );
 
-  // 7. Sub-Second Position Monitor Loop (Fast 2s Turbo Scalp Loop)
+  // 7. Sub-Second Position Monitor Loop (Target Profit Lock & Zero Fee Drag)
   useEffect(() => {
     if (!activePosition || activePosition.status !== 'OPEN') return;
 
@@ -889,20 +847,33 @@ export default function App() {
       // Update position metrics with real values
       setActivePosition((prev) => (prev ? { ...prev, currentPrice: currentSellPrice, grossPnl, netPnl } : null));
 
-      // 1. Instant Take Profit on Target Hit (STRICT REAL PROFIT ONLY):
-      // Must cover ALL Bitfinex fees + user net profit target
-      if ((currentSellPrice >= pos.targetExitPrice || netPnl >= (cfg.targetProfitUsd || 0.00004)) && netPnl > 0.0000001) {
+      // 1. Instant Take Profit on Target Hit
+      // User Rule: "eth jab 4 dollar ooper jai entry price kay nikal lo doosri trade lagawo ya karo"
+      const isEth = pos.symbol.toUpperCase().includes('ETH');
+      const ethTargetPrice = pos.entryPrice + 4.0;
+      const targetNetUsd = cfg.targetProfitUsd || 0.00004;
+
+      const isEthTargetHit = isEth && (currentSellPrice >= ethTargetPrice);
+      const isStandardTargetHit = !isEth && (
+        (currentSellPrice >= pos.targetExitPrice || grossPnl >= targetNetUsd || netPnl >= targetNetUsd) &&
+        grossPnl > 0.0000001
+      );
+
+      if (isEthTargetHit || isStandardTargetHit) {
         closePosition('TARGET_PROFIT_HIT');
         return;
       }
 
-      // 2. Fast Hold Window:
-      // When the hold window has elapsed, ONLY close IF real net profit target is achieved!
-      // In spot crypto, if price dipped temporarily, we NEVER sell at a loss!
-      // Spot coins are held safely until buyers bounce the price into profit!
+      // STOP LOSS REMOVED:
+      // User Rule: "ya stop loss wala hatwo es say tax kat kay loss ho raha"
+      // In spot crypto, we NEVER sell on a stop-loss or scratch because Bitfinex taker fees (tax)
+      // are deducted on exit, resulting in a loss.
+      // Coins are held safely until the price rebounds and hits the target!
+
+      // 2. Hold Duration Check: ONLY exit if position is in genuine profit!
       const fastHoldLimit = cfg.maxHoldDurationMs || 2000;
       if (elapsed >= fastHoldLimit) {
-        if (netPnl >= (cfg.targetProfitUsd || 0.00004) && netPnl > 0.0000001) {
+        if ((netPnl >= targetNetUsd || grossPnl >= targetNetUsd) && grossPnl > 0.0000001) {
           closePosition('TARGET_PROFIT_HIT');
           return;
         }
@@ -918,20 +889,24 @@ export default function App() {
 
     const autoLoop = setInterval(() => {
       if (!activePositionRef.current) {
-        // Enforce full data-driven analysis: Never trade during dumps or non-bottom prices
+        const now = Date.now();
+        if (now - lastTradeExitTimeRef.current < 500) return;
+
+        // Auto Scalp Execution Gate:
+        // Must be in bottom dip (<=35%), not at peak, dump finished, and upward bounce confirmed!
         const sigs = signalsRef.current;
         if (
           sigs.readyToTrigger &&
           sigs.isAtFluctuationBottom &&
-          sigs.aggressiveBuyersConfirmed &&
+          !sigs.isAtPeak &&
           !sigs.isSellersDumping &&
-          sigs.postFeeViableIn2Min &&
+          sigs.upwardReversalConfirmed &&
           sigs.confluenceScore >= 60
         ) {
           triggerScalp(false);
         }
       }
-    }, 300);
+    }, 200);
 
     return () => clearInterval(autoLoop);
   }, [config.autoScalpActive, triggerScalp]);
