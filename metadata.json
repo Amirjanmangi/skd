@@ -1,0 +1,8 @@
+{
+  "name": "Bitfinex HFT AI Scalper",
+  "description": "High-frequency sub-second spot scalping bot for Bitfinex with order book imbalance, microprice, aggressive volume delta, and fee guard protection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
